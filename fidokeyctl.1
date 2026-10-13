@@ -1,0 +1,87 @@
+.\" Copyright (c) 2026 rboug
+.\"
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+.\" WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+.\" MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+.\" ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+.\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+.\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+.\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+.\"
+.Dd October 13, 2026
+.Dt FIDOKEYCTL 1
+.Os
+.Sh NAME
+.Nm fidokeyctl
+.Nd inspect and manage FIDO authenticators
+.Sh SYNOPSIS
+.Nm
+.Op Fl d
+.Fl i
+.Op Fl f Ar device
+.Sh DESCRIPTION
+The
+.Nm
+utility inspects and manages FIDO authenticators using
+.Xr libfido2 3 .
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl d
+Enable libfido2 debugging output.
+.It Fl f Ar device
+Use the specified FIDO device.
+If this option is omitted,
+.Nm
+automatically selects the device when exactly one authenticator is
+available.
+.It Fl i
+Display information about the authenticator.
+.El
+.Pp
+If more than one FIDO authenticator is present and
+.Fl f
+is not specified,
+.Nm
+lists the available devices and exits without selecting one.
+.Sh SECURITY
+.Nm
+uses
+.Xr pledge 2
+to restrict available system calls.
+After device discovery,
+.Xr unveil 2
+restricts filesystem access to the selected FIDO device.
+Once the device has been opened, filesystem access is removed from the
+pledged capabilities.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Display information about the only connected authenticator:
+.Bd -literal -offset indent
+$ fidokeyctl -i
+.Ed
+.Pp
+Select a specific authenticator:
+.Bd -literal -offset indent
+$ fidokeyctl -i -f /dev/fido/0
+.Ed
+.Pp
+Enable libfido2 diagnostic output:
+.Bd -literal -offset indent
+$ fidokeyctl -d -i
+.Ed
+.Sh SEE ALSO
+.Xr ssh-keygen 1 ,
+.Xr pledge 2 ,
+.Xr unveil 2 ,
+.Xr fido 4 ,
+.Xr fido_cbor_info_new 3 ,
+.Xr fido_dev_info_manifest 3 ,
+.Xr fido_dev_open 3
+.Sh AUTHORS
+.An rboug
