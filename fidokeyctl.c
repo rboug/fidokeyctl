@@ -31,7 +31,8 @@ static int		 select_device(char *, size_t, const char *);
 static void		 print_aaguid(const fido_cbor_info_t *);
 static void		 print_options(const fido_cbor_info_t *);
 static void		 print_versions(const fido_cbor_info_t *);
-static void		 show_info(const char *);
+static void		 show_info(fido_dev_t *, const char *);
+static void		 show_retries(fido_dev_t *);
 static const char	*yesno(bool);
 static __dead void	 usage(void);
 
@@ -90,8 +91,16 @@ print_aaguid(const fido_cbor_info_t *ci)
 		return;
 	}
 
-	for (i = 0; i < n; i++)
+	if (n != 16) {
+		printf("invalid\n");
+		return;
+	}
+
+	for (i = 0; i < n; i++) {
+		if (i == 4 || i == 6 || i == 8 || i == 10)
+			putchar('-');
 		printf("%02x", aaguid[i]);
+	}
 	printf("\n");
 }
 
@@ -150,24 +159,10 @@ select_device(char *path, size_t pathlen, const char *requested)
 }
 
 static void
-show_info(const char *path)
+show_info(fido_dev_t *dev, const char *path)
 {
 	fido_cbor_info_t *ci;
-	fido_dev_t *dev;
 	int r;
-
-	if ((dev = fido_dev_new()) == NULL)
-		errx(1, "fido_dev_new");
-
-	if ((r = fido_dev_open(dev, path)) != FIDO_OK)
-		errx(1, "%s: %s", path, fido_strerr(r));
-
-	/*
-	 * The device is now open. No further filesystem access should be
-	 * necessary.
-	 */
-	if (pledge("stdio", NULL) == -1)
-		err(1, "pledge");
 
 	printf("device: %s\n", path);
 	printf("protocol: %s\n", fido_dev_is_fido2(dev) ? "FIDO2" : "U2F");
@@ -190,11 +185,23 @@ show_info(const char *path)
 	print_aaguid(ci);
 
 	fido_cbor_info_free(&ci);
+}
 
-	if ((r = fido_dev_close(dev)) != FIDO_OK)
-		warnx("fido_dev_close: %s", fido_strerr(r));
+static void
+show_retries(fido_dev_t *dev)
+{
+	int retries;
+	int r;
 
-	fido_dev_free(&dev);
+	r = fido_dev_get_retry_count(dev, &retries);
+	if (r == FIDO_ERR_PIN_NOT_SET) {
+		printf("pin-retries: not-set\n");
+		return;
+	}
+	if (r != FIDO_OK)
+		errx(1, "fido_dev_get_retry_count: %s", fido_strerr(r));
+
+	printf("pin-retries: %d\n", retries);
 }
 
 static __dead void
@@ -209,13 +216,16 @@ main(int argc, char *argv[])
 {
 	char device[PATH_MAX];
 	const char *requested;
-	int ch, debug, info;
+	int ch, debug, info, retries;
+	fido_dev_t *dev;
+	int r;
 
 	debug = 0;
 	info = 0;
+	retries = 0;
 	requested = NULL;
 
-	while ((ch = getopt(argc, argv, "dif:")) != -1) {
+	while ((ch = getopt(argc, argv, "dif:r")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug = 1;
@@ -226,6 +236,9 @@ main(int argc, char *argv[])
 		case 'i':
 			info = 1;
 			break;
+		case 'r':
+			retries = 1;
+			break;
 		default:
 			usage();
 		}
@@ -234,7 +247,7 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc != 0 || !info)
+	if (argc != 0 || (!info && !retries))
 		usage();
 
 	/*
@@ -257,7 +270,32 @@ main(int argc, char *argv[])
 	if (unveil(NULL, NULL) == -1)
 		err(1, "unveil");
 
-	show_info(device);
+	/*
+	 * Open device.
+	 */
+	if ((dev = fido_dev_new()) == NULL)
+		errx(1, "fido_dev_new");
+
+	if ((r = fido_dev_open(dev, device)) != FIDO_OK)
+		errx(1, "%s: %s", device, fido_strerr(r));
+
+	/*
+	 * The device is now open, no further filesystem access should be
+	 * necessary.
+	 */
+	if (pledge("stdio", NULL) == -1)
+		err(1, "pledge");
+
+	if (info)
+		show_info(dev, device);
+
+	if (retries)
+		show_retries(dev);
+
+	if ((r = fido_dev_close(dev)) != FIDO_OK)
+		warnx("fido_dev_close: %s", fido_strerr(r));
+
+	fido_dev_free(&dev);
 
 	return 0;
 }
