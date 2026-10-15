@@ -19,20 +19,26 @@
 #include <err.h>
 #include <fido.h>
 #include <limits.h>
+#include <readpassphrase.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#define MAX_DEVS    64
+#define MAX_DEVS	64
+#define PIN_BUFSIZE	64
 
 static int		 select_device(char *, size_t, const char *);
 static void		 print_aaguid(const fido_cbor_info_t *);
 static void		 print_options(const fido_cbor_info_t *);
 static void		 print_versions(const fido_cbor_info_t *);
 static void		 show_info(fido_dev_t *, const char *);
+static int		 get_retries(fido_dev_t *);
 static void		 show_retries(fido_dev_t *);
+static void		 read_new_pin(char *, size_t);
+static void		 set_pin(fido_dev_t *);
+static void		 update_pin(fido_dev_t *);
 static const char	*yesno(bool);
 static __dead void	 usage(void);
 
@@ -187,27 +193,117 @@ show_info(fido_dev_t *dev, const char *path)
 	fido_cbor_info_free(&ci);
 }
 
-static void
-show_retries(fido_dev_t *dev)
+static int
+get_retries(fido_dev_t *dev)
 {
 	int retries;
 	int r;
 
 	r = fido_dev_get_retry_count(dev, &retries);
-	if (r == FIDO_ERR_PIN_NOT_SET) {
-		printf("pin-retries: not-set\n");
-		return;
-	}
+	if (r == FIDO_ERR_PIN_NOT_SET)
+		return -1;
 	if (r != FIDO_OK)
 		errx(1, "fido_dev_get_retry_count: %s", fido_strerr(r));
 
-	printf("pin-retries: %d\n", retries);
+	return retries;
+}
+
+static void
+show_retries(fido_dev_t *dev)
+{
+	int retries;
+
+	retries = get_retries(dev);
+
+	if (retries == -1)
+		printf("pin-retries: not-set\n");
+	else
+		printf("pin-retries: %d\n", retries);
+}
+
+static void
+read_new_pin(char *pin, size_t pinsz)
+{
+	char confirm[PIN_BUFSIZE];
+
+	if (readpassphrase("New PIN: ", pin, pinsz, RPP_REQUIRE_TTY) == NULL)
+		err(1, "readpassphrase");
+
+	if (readpassphrase("Confirm PIN: ", confirm, sizeof(confirm),
+	    RPP_REQUIRE_TTY) == NULL) {
+		explicit_bzero(pin, pinsz);
+		err(1, "readpassphrase");
+	}
+
+	if (strcmp(pin, confirm) != 0) {
+		explicit_bzero(pin, pinsz);
+		explicit_bzero(confirm, sizeof(confirm));
+		errx(1, "PINs do not match");
+	}
+
+	explicit_bzero(confirm, sizeof(confirm));
+}
+
+static void
+set_pin(fido_dev_t *dev)
+{
+	char pin[PIN_BUFSIZE];
+	int r;
+
+	if (fido_dev_has_pin(dev))
+		errx(1, "PIN already set");
+
+	read_new_pin(pin, sizeof(pin));
+
+	r = fido_dev_set_pin(dev, pin, NULL);
+
+	explicit_bzero(pin, sizeof(pin));
+
+	if (r != FIDO_OK)
+		errx(1, "fido_dev_set_pin: %s", fido_strerr(r));
+
+	printf("PIN set\n");
+}
+
+static void
+update_pin(fido_dev_t *dev)
+{
+	char oldpin[PIN_BUFSIZE];
+	char pin[PIN_BUFSIZE];
+	int r, retries;
+
+	if (!fido_dev_has_pin(dev))
+		errx(1, "PIN not set");
+
+	if (readpassphrase("Current PIN: ", oldpin, sizeof(oldpin),
+	    RPP_REQUIRE_TTY) == NULL)
+		err(1, "readpassphrase");
+
+	read_new_pin(pin, sizeof(pin));
+
+	r = fido_dev_set_pin(dev, pin, oldpin);
+
+	explicit_bzero(oldpin, sizeof(oldpin));
+	explicit_bzero(pin, sizeof(pin));
+
+	if (r != FIDO_OK) {
+		if (r == FIDO_ERR_PIN_INVALID) {
+			retries = get_retries(dev);
+			if (retries >= 0)
+				errx(1, "incorrect PIN (%d retries remaining)",
+				    retries);
+			errx(1, "incorrect PIN");
+		}
+		errx(1, "fido_dev_set_pin: %s", fido_strerr(r));
+	}
+
+	printf("PIN updated\n");
 }
 
 static __dead void
 usage(void)
 {
-	fprintf(stderr, "Usage: %s [-d] -i [-f device]\n", getprogname());
+	fprintf(stderr, "Usage: %s [-diPpr] [-f device]\n", getprogname());
 	exit(1);
 }
 
@@ -216,16 +312,19 @@ main(int argc, char *argv[])
 {
 	char device[PATH_MAX];
 	const char *requested;
-	int ch, debug, info, retries;
+	int ch, debug, info, pinop, retries, setpin, updatepin;
 	fido_dev_t *dev;
 	int r;
 
 	debug = 0;
 	info = 0;
-	retries = 0;
+	pinop = 0;
 	requested = NULL;
+	retries = 0;
+	setpin = 0;
+	updatepin = 0;
 
-	while ((ch = getopt(argc, argv, "dif:r")) != -1) {
+	while ((ch = getopt(argc, argv, "dif:pPr")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug = 1;
@@ -239,6 +338,12 @@ main(int argc, char *argv[])
 		case 'r':
 			retries = 1;
 			break;
+		case 'p':
+			setpin = 1;
+			break;
+		case 'P':
+			updatepin = 1;
+			break;
 		default:
 			usage();
 		}
@@ -247,50 +352,71 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc != 0 || (!info && !retries))
+	pinop = setpin || updatepin;
+
+	if (argc != 0 || (!info && !retries && !pinop))
 		usage();
 
 	/*
-	 * Restrict the available syscall classes before device discovery.
-	 * unveil remains available until the selected device is known.
+	 * No debug mode if setpin is set to prevent display of sensitive data.
 	 */
-	if (pledge("stdio rpath wpath unveil", NULL) == -1)
-		err(1, "pledge");
+	if (debug && pinop)
+		errx(1, "-d cannot be used with PIN operations");
+
+	if (setpin && updatepin)
+		errx(1, "-p and -P are mutually exclusive");
+
+	/* Restrict the available syscall classes. */
+	if (pinop) {
+		if (pledge("stdio tty rpath wpath unveil", NULL) == -1)
+			err(1, "pledge");
+	} else {
+		if (pledge("stdio rpath wpath unveil", NULL) == -1)
+			err(1, "pledge");
+	}
 
 	fido_init(debug ? FIDO_DEBUG : 0);
 
 	select_device(device, sizeof(device), requested);
 
-	/*
-	 * From this point on, the process may only see the selected FIDO
-	 * device in the filesystem.
-	 */
+	/* Restrict filesystem visibility to the selected authenticator. */
 	if (unveil(device, "rw") == -1)
 		err(1, "unveil %s", device);
 	if (unveil(NULL, NULL) == -1)
 		err(1, "unveil");
 
-	/*
-	 * Open device.
-	 */
+	/* Open device. */
 	if ((dev = fido_dev_new()) == NULL)
 		errx(1, "fido_dev_new");
 
 	if ((r = fido_dev_open(dev, device)) != FIDO_OK)
 		errx(1, "%s: %s", device, fido_strerr(r));
 
-	/*
-	 * The device is now open, no further filesystem access should be
-	 * necessary.
-	 */
-	if (pledge("stdio", NULL) == -1)
-		err(1, "pledge");
+	/* if a PIN operation follows, retain terminal access temporarily. */
+	if (pinop) {
+		if (pledge("stdio tty", NULL) == -1)
+			err(1, "pledge");
+	} else {
+		if (pledge("stdio", NULL) == -1)
+			err(1, "pledge");
+	}
 
 	if (info)
 		show_info(dev, device);
 
 	if (retries)
 		show_retries(dev);
+
+	if (setpin)
+		set_pin(dev);
+
+	if (updatepin)
+		update_pin(dev);
+
+	if (pinop) {
+		if (pledge("stdio", NULL) == -1)
+			err(1, "pledge");
+	}
 
 	if ((r = fido_dev_close(dev)) != FIDO_OK)
 		warnx("fido_dev_close: %s", fido_strerr(r));
