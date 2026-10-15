@@ -17,6 +17,8 @@ Implemented:
 - PIN creation
 - PIN modification
 - PIN retry counter
+- improved PIN error and lockout reporting
+- FIDO authenticator reset with explicit safety checks
 - user verification capabilities
 - credential management capability detection
 - CTAP2 versions and options
@@ -51,6 +53,7 @@ pin-retries: 8
 
 ```text
 fidokeyctl [-diPpr] [-f device]
+fidokeyctl -R
 ```
 
 Options:
@@ -61,6 +64,7 @@ Options:
 - `-p` — set the initial FIDO2 PIN
 - `-P` — change an existing FIDO2 PIN
 - `-r` — display the remaining PIN retry count
+- `-R` — reset the FIDO authenticator
 
 If exactly one authenticator is connected, it is selected automatically.
 
@@ -73,6 +77,32 @@ fidokeyctl -ir
 PINs are read directly from the terminal without echo and are never accepted as command-line arguments.
 
 Debug mode cannot be combined with PIN operations in order to avoid exposing sensitive data through diagnostic output.
+
+### FIDO reset
+
+The `-R` operation resets the FIDO application and erases the configured PIN and all FIDO credentials stored on the authenticator.
+
+For safety:
+
+- `-R` cannot be combined with other options
+- only one FIDO authenticator may be connected
+- explicit confirmation by typing `RESET` is required
+- the authenticator must be physically removed and reinserted before the reset
+- physical user presence is required to confirm the operation
+
+Example:
+
+```text
+$ fidokeyctl -R
+WARNING: FIDO reset will erase the PIN and all FIDO credentials
+stored on this authenticator.
+
+Type "RESET" to continue: RESET
+Remove and reinsert the authenticator, then press Enter immediately.
+
+Touch the authenticator to confirm reset.
+FIDO authenticator reset
+```
 
 ## Build
 
@@ -102,6 +132,7 @@ The project uses the native BSD make infrastructure and links directly against t
 - no unnecessary filesystem writes
 - no secrets passed through command-line arguments
 - sensitive buffers explicitly cleared after use
+- explicit safeguards around destructive operations
 - least-privilege execution with `pledge(2)` and `unveil(2)`
 - direct use of `libfido2`
 - vendor-independent FIDO2 support where possible
@@ -120,10 +151,9 @@ Future features include:
 
 - resident/discoverable credential inspection and management
 - additional CTAP2 capability and configuration information
-- improved PIN error and lockout reporting
+- further PIN and authenticator status reporting
 - CTAP2 configuration operations
 - support for additional authenticator management operations
-- carefully guarded destructive operations such as FIDO reset
 - machine-readable output
 
 ## License
