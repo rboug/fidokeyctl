@@ -29,7 +29,7 @@
 #define MAX_DEVS	64
 #define PIN_BUFSIZE	64
 
-static int		 select_device(char *, size_t, const char *);
+static int		 select_device(char *, size_t, const char *, int);
 static void		 print_aaguid(const fido_cbor_info_t *);
 static void		 print_options(const fido_cbor_info_t *);
 static void		 print_versions(const fido_cbor_info_t *);
@@ -39,6 +39,8 @@ static void		 show_retries(fido_dev_t *);
 static void		 read_new_pin(char *, size_t);
 static void		 set_pin(fido_dev_t *);
 static void		 update_pin(fido_dev_t *);
+static void		 confirm_reset(void);
+static void		 reset_device(void);
 static const char	*yesno(bool);
 static __dead void	 usage(void);
 
@@ -111,7 +113,8 @@ print_aaguid(const fido_cbor_info_t *ci)
 }
 
 static int
-select_device(char *path, size_t pathlen, const char *requested)
+select_device(char *path, size_t pathlen, const char *requested,
+    int allow_select)
 {
 	const fido_dev_info_t *di;
 	fido_dev_info_t *devlist;
@@ -146,10 +149,14 @@ select_device(char *path, size_t pathlen, const char *requested)
 			fprintf(stderr, " %s",
 			    devpath != NULL ? devpath : "{unknown}");
 			if (product != NULL)
-				fprintf(stderr, " :%s", product);
+				fprintf(stderr, ": %s", product);
 			fprintf(stderr, "\n");
 		}
-		errx(1, "use -f device to select one");
+
+		if (allow_select)
+			errx(1, "use -f device to select one");
+		else
+			errx(1, "connect only the authenticator to reset");
 	}
 
 	di = fido_dev_info_ptr(devlist, 0);
@@ -162,6 +169,73 @@ select_device(char *path, size_t pathlen, const char *requested)
 	fido_dev_info_free(&devlist, MAX_DEVS);
 
 	return 0;
+}
+
+static void
+confirm_reset(void)
+{
+	char buf[16];
+
+	fprintf(stderr,
+	    "WARNING: FIDO reset will erase the PIN and all FIDO credentials\n"
+	    "stored on this authenticator.\n\n"
+	    "Type \"RESET\" to continue: ");
+
+	if (fgets(buf, sizeof(buf), stdin) == NULL)
+		err(1, "fgets");
+
+	buf[strcspn(buf, "\n")] = '\0';
+
+	if (strcmp(buf, "RESET") != 0)
+		errx(1, "reset cancelled");
+}
+
+static void
+reset_device(void)
+{
+	char path[PATH_MAX];
+	fido_dev_t *dev;
+	int r;
+
+	/* Ensure that only one authenticator is currently connected. */
+	select_device(path, sizeof(path), NULL, 0);
+
+	confirm_reset();
+
+	fprintf(stderr, "Remove and reinsert the authenticator, then press "
+	    "Enter immediately.\n");
+
+	if (getchar() == EOF)
+		err(1, "getchar");
+
+	/* Discover the authenticator again after the power cycle. */
+	select_device(path, sizeof(path), NULL, 0);
+
+	if ((dev = fido_dev_new()) == NULL)
+		errx(1, "fido_dev_new");
+
+	if ((r = fido_dev_open(dev, path)) != FIDO_OK)
+		errx(1, "%s: %s", path, fido_strerr(r));
+
+	fprintf(stderr, "Touch the authenticator to confirm reset.\n");
+
+	r = fido_dev_reset(dev);
+
+	if (r != FIDO_OK) {
+		if (r == FIDO_ERR_NOT_ALLOWED)
+			errx(1, "reset not allowed, remove and reinsert the "
+			    "authenticator and try again");
+		if (r == FIDO_ERR_ACTION_TIMEOUT)
+			errx(1, "reset confirmation timed out");
+		errx(1, "fido_dev_reset: %s", fido_strerr(r));
+	}
+
+	printf("FIDO authenticator reset\n");
+
+	if ((r = fido_dev_close(dev)) != FIDO_OK)
+		warnx("fido_dev_close: %s", fido_strerr(r));
+
+	fido_dev_free(&dev);
 }
 
 static void
@@ -294,6 +368,11 @@ update_pin(fido_dev_t *dev)
 				    retries);
 			errx(1, "incorrect PIN");
 		}
+		if (r == FIDO_ERR_PIN_AUTH_BLOCKED)
+			errx(1, "PIN authentication temporarily blocked, "
+			    "remove and reinsert device");
+		if (r == FIDO_ERR_PIN_BLOCKED)
+			errx(1, "PIN blocked, FIDO reset required");
 		errx(1, "fido_dev_set_pin: %s", fido_strerr(r));
 	}
 
@@ -303,7 +382,10 @@ update_pin(fido_dev_t *dev)
 static __dead void
 usage(void)
 {
-	fprintf(stderr, "Usage: %s [-diPpr] [-f device]\n", getprogname());
+	fprintf(stderr,
+	    "usage: %s [-diPpr] [-f device]\n"
+	    "       %s -R\n",
+	    getprogname(), getprogname());
 	exit(1);
 }
 
@@ -312,19 +394,19 @@ main(int argc, char *argv[])
 {
 	char device[PATH_MAX];
 	const char *requested;
-	int ch, debug, info, pinop, retries, setpin, updatepin;
+	int ch, debug, info, pinop, reset, retries, setpin, updatepin;
 	fido_dev_t *dev;
 	int r;
 
 	debug = 0;
 	info = 0;
-	pinop = 0;
 	requested = NULL;
+	reset = 0;
 	retries = 0;
 	setpin = 0;
 	updatepin = 0;
 
-	while ((ch = getopt(argc, argv, "dif:pPr")) != -1) {
+	while ((ch = getopt(argc, argv, "dif:pPrR")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug = 1;
@@ -335,14 +417,17 @@ main(int argc, char *argv[])
 		case 'i':
 			info = 1;
 			break;
-		case 'r':
-			retries = 1;
+		case 'P':
+			updatepin = 1;
 			break;
 		case 'p':
 			setpin = 1;
 			break;
-		case 'P':
-			updatepin = 1;
+		case 'R':
+			reset = 1;
+			break;
+		case 'r':
+			retries = 1;
 			break;
 		default:
 			usage();
@@ -352,19 +437,50 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	pinop = setpin || updatepin;
-
-	if (argc != 0 || (!info && !retries && !pinop))
+	if (argc != 0)
 		usage();
 
-	/*
-	 * No debug mode if setpin is set to prevent display of sensitive data.
-	 */
-	if (debug && pinop)
-		errx(1, "-d cannot be used with PIN operations");
+	if (reset) {
+		if (debug || info || retries || setpin || updatepin
+		    || requested != NULL)
+			errx(1, "-R cannot be combined with other options");
+	} else if (!info && !retries && !setpin && !updatepin)
+		usage();
 
 	if (setpin && updatepin)
 		errx(1, "-p and -P are mutually exclusive");
+
+	if (reset) {
+		if (pledge("stdio rpath wpath unveil", NULL) == -1)
+			err(1, "pledge");
+
+		fido_init(0);
+
+		/*
+		 * Keep /dev/fido visible during the power-cycle so the
+		 * authenticator can be rediscovered.
+		 */
+		if (unveil("/dev/fido", "rw") == -1)
+			err(1, "unveil /dev/fido");
+		if (unveil(NULL, NULL) == -1)
+			err(1, "unveil");
+
+		if (pledge("stdio rpath wpath", NULL) == -1)
+			err(1, "pledge");
+
+		reset_device();
+
+		return 0;
+	}
+
+	pinop = setpin || updatepin;
+
+	/*
+	 * Disable debug mode for PIN operations to prevent display of
+	 * sensitive data.
+	 */
+	if (debug && pinop)
+		errx(1, "-d cannot be used with PIN operations");
 
 	/* Restrict the available syscall classes. */
 	if (pinop) {
@@ -377,7 +493,7 @@ main(int argc, char *argv[])
 
 	fido_init(debug ? FIDO_DEBUG : 0);
 
-	select_device(device, sizeof(device), requested);
+	select_device(device, sizeof(device), requested, 1);
 
 	/* Restrict filesystem visibility to the selected authenticator. */
 	if (unveil(device, "rw") == -1)
