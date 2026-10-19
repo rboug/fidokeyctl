@@ -12,52 +12,193 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd October 13, 2026
+.Dd October 19, 2026
 .Dt FIDOKEYCTL 1
 .Os
 .Sh NAME
 .Nm fidokeyctl
-.Nd inspect and manage FIDO authenticators
+.Nd inspect and manage FIDO security keys
 .Sh SYNOPSIS
 .Nm
-.Op Fl d
-.Fl i
+.Op Fl cdiPpr
 .Op Fl f Ar device
+.Nm
+.Fl R
 .Sh DESCRIPTION
 The
 .Nm
 utility inspects and manages FIDO authenticators using
 .Xr libfido2 3 .
 .Pp
+It provides a small Unix-style interface for querying authenticator
+capabilities, managing FIDO2 PINs, inspecting resident credentials,
+and performing a guarded FIDO reset.
+.Pp
+If exactly one FIDO authenticator is connected, it is selected
+automatically.
+If multiple authenticators are present, an explicit device must be
+selected with
+.Fl f ,
+except when using
+.Fl R .
+.Pp
 The options are as follows:
 .Bl -tag -width Ds
+.It Fl c
+Display resident, or discoverable, credential information.
+.Pp
+The authenticator PIN is requested from the terminal.
+The output includes the number of existing resident credentials,
+an estimate of the remaining credential capacity, relying party
+information, user information, and credential identifiers.
+.Pp
+The reported remaining credential count is an estimate supplied by
+the authenticator and must not be interpreted as a fixed storage
+capacity.
 .It Fl d
-Enable libfido2 debugging output.
+Enable diagnostic output from
+.Xr libfido2 3 .
+.Pp
+Debug mode cannot be combined with operations requiring PIN entry.
 .It Fl f Ar device
-Use the specified FIDO device.
+Use the specified FIDO device, for example
+.Pa /dev/fido/0 .
+.Pp
 If this option is omitted,
 .Nm
-automatically selects the device when exactly one authenticator is
+automatically selects the authenticator when exactly one device is
 available.
 .It Fl i
 Display information about the authenticator.
+.Pp
+The output includes the FIDO protocol version, PIN and user
+verification capabilities, credential management support, CTAP2
+versions and options, and the authenticator AAGUID.
+.It Fl p
+Set the initial FIDO2 PIN.
+.Pp
+This operation is only valid when no PIN is currently configured.
+The new PIN is read from the terminal without echo and must be
+entered twice for confirmation.
+.It Fl P
+Change an existing FIDO2 PIN.
+.Pp
+The current PIN and the new PIN are read from the terminal without
+echo.
+The new PIN must be entered twice for confirmation.
+.It Fl r
+Display the number of remaining FIDO2 PIN attempts.
+.Pp
+If no PIN is configured,
+.Nm
+reports:
+.Bd -literal -offset indent
+pin-retries: not-set
+.Ed
+.It Fl R
+Reset the FIDO application on the authenticator.
+.Pp
+This is a destructive operation.
+It removes the configured FIDO PIN and all FIDO credentials stored
+on the authenticator.
+.Pp
+For safety,
+.Fl R
+cannot be combined with any other option and exactly one FIDO
+authenticator must be connected.
+The user must explicitly type
+.Dq RESET ,
+physically remove and reinsert the authenticator, and confirm the
+operation through user presence on the authenticator.
+.El
+.Sh PIN HANDLING
+PINs are read directly from the controlling terminal using
+.Xr readpassphrase 3
+and are never accepted as command-line arguments.
+.Pp
+Sensitive PIN buffers are explicitly cleared from memory after use.
+.Pp
+When an incorrect PIN is supplied,
+.Nm
+reports the remaining number of attempts when available.
+A temporary PIN authentication block may require the authenticator
+to be physically removed and reinserted.
+.Pp
+If the PIN retry counter is exhausted, the FIDO PIN becomes blocked
+and a FIDO reset may be required.
+Such a reset destroys FIDO credentials stored on the authenticator.
+.Sh CREDENTIAL MANAGEMENT
+The
+.Fl c
+option uses the FIDO2 credential management interface to inspect
+resident credentials stored on the authenticator.
+.Pp
+For each relying party,
+.Nm
+may display:
+.Bl -bullet -compact
+.It
+the relying party identifier;
+.It
+the relying party name;
+.It
+the user name;
+.It
+the user display name;
+.It
+the credential identifier.
 .El
 .Pp
-If more than one FIDO authenticator is present and
-.Fl f
-is not specified,
-.Nm
-lists the available devices and exits without selecting one.
+Only resident, also known as discoverable, credentials stored on the
+authenticator can be listed. Non-resident WebAuthn credentials, such
+as traditional security-key registrations, are not visible through
+credential management. The absence of a credential from this output
+does not imply that the authenticator has never been registered with
+the corresponding service.
+.Sh FIDO RESET
+The
+.Fl R
+operation is intentionally handled separately from other operations.
+.Pp
+A typical reset session is:
+.Bd -literal -offset indent
+$ fidokeyctl -R
+WARNING: FIDO reset will erase the PIN and all FIDO credentials
+stored on this authenticator.
+
+Type "RESET" to continue: RESET
+Remove and reinsert the authenticator, then press Enter immediately.
+
+Touch the authenticator to confirm reset.
+FIDO authenticator reset
+.Ed
+.Pp
+Authenticators may impose a limited time window after power-up during
+which a reset is permitted.
+The exact behaviour is authenticator-dependent.
 .Sh SECURITY
 .Nm
 uses
 .Xr pledge 2
-to restrict available system calls.
-After device discovery,
+to restrict available system calls and
 .Xr unveil 2
-restricts filesystem access to the selected FIDO device.
-Once the device has been opened, filesystem access is removed from the
-pledged capabilities.
+to restrict filesystem visibility.
+.Pp
+During normal operation, filesystem access is restricted to the
+selected FIDO device.
+Once the authenticator has been opened, filesystem access is dropped
+from the pledged capabilities.
+.Pp
+Operations requiring PIN input temporarily retain terminal access
+until PIN entry is complete.
+.Pp
+During a FIDO reset,
+.Nm
+keeps the FIDO device namespace visible long enough to rediscover the
+authenticator after it has been physically removed and reinserted.
+.Pp
+Debug mode is not allowed during PIN-authenticated operations in order
+to avoid exposing potentially sensitive diagnostic information.
 .Sh EXIT STATUS
 .Ex -std
 .Sh EXAMPLES
@@ -66,22 +207,62 @@ Display information about the only connected authenticator:
 $ fidokeyctl -i
 .Ed
 .Pp
+Display information and the PIN retry count:
+.Bd -literal -offset indent
+$ fidokeyctl -ir
+.Ed
+.Pp
 Select a specific authenticator:
 .Bd -literal -offset indent
 $ fidokeyctl -i -f /dev/fido/0
 .Ed
 .Pp
-Enable libfido2 diagnostic output:
+Set the initial FIDO2 PIN:
 .Bd -literal -offset indent
-$ fidokeyctl -d -i
+$ fidokeyctl -p
+New PIN:
+Confirm PIN:
+PIN set
+.Ed
+.Pp
+Change an existing FIDO2 PIN:
+.Bd -literal -offset indent
+$ fidokeyctl -P
+Current PIN:
+New PIN:
+Confirm PIN:
+PIN updated
+.Ed
+.Pp
+Display resident credential information:
+.Bd -literal -offset indent
+$ fidokeyctl -c
+PIN:
+resident-credentials: 2
+resident-credentials-remaining: 23
+
+rp-id: example.com
+rp-name: Example
+  credential:
+    user-name: user
+    display-name: User
+    credential-id: 0123456789abcdef
+.Ed
+.Pp
+Reset the FIDO authenticator:
+.Bd -literal -offset indent
+$ fidokeyctl -R
 .Ed
 .Sh SEE ALSO
 .Xr ssh-keygen 1 ,
 .Xr pledge 2 ,
+.Xr readpassphrase 3 ,
 .Xr unveil 2 ,
 .Xr fido 4 ,
 .Xr fido_cbor_info_new 3 ,
+.Xr fido_credman_metadata_new 3 ,
 .Xr fido_dev_info_manifest 3 ,
-.Xr fido_dev_open 3
+.Xr fido_dev_open 3 ,
+.Xr fido_dev_set_pin 3
 .Sh AUTHORS
 .An rboug

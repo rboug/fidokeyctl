@@ -18,6 +18,8 @@ Implemented:
 - PIN modification
 - PIN retry counter
 - improved PIN error and lockout reporting
+- resident/discoverable credential inspection
+- relying party and credential metadata display
 - FIDO authenticator reset with explicit safety checks
 - user verification capabilities
 - credential management capability detection
@@ -49,15 +51,37 @@ $ fidokeyctl -r
 pin-retries: 8
 ```
 
+Resident credentials can be inspected with:
+
+```sh
+$ fidokeyctl -c
+PIN:
+resident-credentials: 2
+resident-credentials-remaining: 98 (estimated)
+
+rp-id: openai.com
+  credentials:
+    user-name: user@example.com
+    display-name: user@example.com
+    credential-id: 0123456789abcdef...
+
+rp-id: github.com
+  credentials:
+    user-name: example
+    display-name: Example User
+    credential-id: fedcba9876543210...
+```
+
 ## Usage
 
 ```text
-fidokeyctl [-diPpr] [-f device]
+fidokeyctl [-cdiPpr] [-f device]
 fidokeyctl -R
 ```
 
 Options:
 
+- `-c` — display resident/discoverable credential information
 - `-d` — enable `libfido2` debug output
 - `-f device` — select a specific FIDO device
 - `-i` — display authenticator information
@@ -68,7 +92,7 @@ Options:
 
 If exactly one authenticator is connected, it is selected automatically.
 
-Multiple read-only operations may be combined, for example:
+Multiple compatible operations may be combined, for example:
 
 ```sh
 fidokeyctl -ir
@@ -76,7 +100,25 @@ fidokeyctl -ir
 
 PINs are read directly from the terminal without echo and are never accepted as command-line arguments.
 
-Debug mode cannot be combined with PIN operations in order to avoid exposing sensitive data through diagnostic output.
+Debug mode cannot be combined with PIN-authenticated operations in order to avoid exposing sensitive data through diagnostic output.
+
+### Resident credentials
+
+The `-c` option uses the FIDO2 credential management interface to inspect resident, also known as discoverable, credentials stored directly on the authenticator.
+
+The output includes:
+
+- the number of existing resident credentials
+- an authenticator-provided estimate of the remaining credential capacity
+- relying party identifiers
+- user names and display names
+- credential identifiers
+
+The remaining credential count is an estimate reported by the authenticator and should not be interpreted as a fixed number of storage slots.
+
+Only resident/discoverable credentials are visible through credential management. A traditional WebAuthn security-key registration may use a non-resident credential and therefore will not appear in `fidokeyctl -c`.
+
+For example, a security key registered with a service solely as a second authentication factor may not be listed, while a passkey stored on the same authenticator typically will be.
 
 ### FIDO reset
 
@@ -149,7 +191,7 @@ It is not intended to replace vendor-specific tools for unrelated functionality 
 
 Future features include:
 
-- resident/discoverable credential inspection and management
+- resident/discoverable credential deletion and management
 - additional CTAP2 capability and configuration information
 - further PIN and authenticator status reporting
 - CTAP2 configuration operations

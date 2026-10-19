@@ -14,10 +14,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <fido/credman.h>
 #include <sys/types.h>
 
 #include <err.h>
 #include <fido.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <readpassphrase.h>
 #include <stdbool.h>
@@ -29,20 +31,33 @@
 #define MAX_DEVS	64
 #define PIN_BUFSIZE	64
 
-static int		 select_device(char *, size_t, const char *, int);
+static void		 confirm_reset(void);
+static int		 get_retries(fido_dev_t *);
+static void		 pin_error(fido_dev_t *, int);
 static void		 print_aaguid(const fido_cbor_info_t *);
+static void		 print_hex(const unsigned char *, size_t);
 static void		 print_options(const fido_cbor_info_t *);
 static void		 print_versions(const fido_cbor_info_t *);
-static void		 show_info(fido_dev_t *, const char *);
-static int		 get_retries(fido_dev_t *);
-static void		 show_retries(fido_dev_t *);
 static void		 read_new_pin(char *, size_t);
-static void		 set_pin(fido_dev_t *);
-static void		 update_pin(fido_dev_t *);
-static void		 confirm_reset(void);
+static void		 read_pin(char *, size_t);
 static void		 reset_device(void);
-static const char	*yesno(bool);
+static int		 select_device(char *, size_t, const char *, int);
+static void		 set_pin(fido_dev_t *);
+static void		 show_credentials(fido_dev_t *);
+static void		 show_info(fido_dev_t *, const char *);
+static void		 show_retries(fido_dev_t *);
+static void		 update_pin(fido_dev_t *);
 static __dead void	 usage(void);
+static const char	*yesno(bool);
+
+static void
+print_hex(const unsigned char *buf, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		printf("%02x", buf[i]);
+}
 
 static const char *
 yesno(bool value)
@@ -239,6 +254,152 @@ reset_device(void)
 }
 
 static void
+pin_error(fido_dev_t *dev, int r)
+{
+	int retries;
+
+	if (r == FIDO_ERR_PIN_INVALID) {
+		retries = get_retries(dev);
+		if (retries >= 0)
+			errx(1, "incorrect PIN (%d retries remaining)",
+			    retries);
+		errx(1, "incorrect PIN");
+	}
+
+	if (r == FIDO_ERR_PIN_AUTH_BLOCKED)
+		errx(1, "PIN authentication temporarily blocked, "
+		    "remove and reinsert device");
+
+	if (r == FIDO_ERR_PIN_BLOCKED)
+		errx(1, "PIN blocked, FIDO reset required");
+}
+
+static void
+show_credentials(fido_dev_t *dev)
+{
+	fido_credman_metadata_t *metadata;
+	fido_credman_rk_t *rk;
+	fido_credman_rp_t *rp;
+	const fido_cred_t *cred;
+	const unsigned char *cred_id;
+	const char *display_name, *rp_id, *rp_name, *user_name;
+	char pin[PIN_BUFSIZE];
+	uint64_t existing, remaining;
+	size_t cred_id_len, i, j, nrp, nrk;
+	int r;
+
+	if (!fido_dev_supports_credman(dev))
+		errx(1, "credential management not supported");
+
+	if (!fido_dev_has_pin(dev))
+		errx(1, "PIN not set");
+
+	read_pin(pin, sizeof(pin));
+
+	if ((metadata = fido_credman_metadata_new()) == NULL) {
+		explicit_bzero(pin, sizeof(pin));
+		errx(1, "fido_credman_metadata_new");
+	}
+
+	r = fido_credman_get_dev_metadata(dev, metadata, pin);
+	if (r != FIDO_OK) {
+		explicit_bzero(pin, sizeof(pin));
+		fido_credman_metadata_free(&metadata);
+		pin_error(dev, r);
+		errx(1, "fido_credman_get_dev_metadata: %s", fido_strerr(r));
+	}
+
+	existing = fido_credman_rk_existing(metadata);
+	remaining = fido_credman_rk_remaining(metadata);
+
+	printf("resident-credentials: %" PRIu64 "\n", existing);
+	printf("resident-credentials-remaining: %" PRIu64 " (estimated)\n", remaining);
+
+	fido_credman_metadata_free(&metadata);
+
+	if (existing == 0) {
+		explicit_bzero(pin, sizeof(pin));
+		return;
+	}
+
+	if ((rp = fido_credman_rp_new()) == NULL) {
+		explicit_bzero(pin, sizeof(pin));
+		errx(1, "fido_credman_rp_new");
+	}
+
+	r = fido_credman_get_dev_rp(dev, rp, pin);
+	if (r != FIDO_OK) {
+		explicit_bzero(pin, sizeof(pin));
+		fido_credman_rp_free(&rp);
+		pin_error(dev, r);
+		errx(1, "fido_credman_get_dev_rp: %s", fido_strerr(r));
+	}
+
+	nrp = fido_credman_rp_count(rp);
+
+	for (i = 0; i < nrp; i++) {
+		rp_id = fido_credman_rp_id(rp, i);
+		rp_name = fido_credman_rp_name(rp, i);
+
+		printf("\n");
+		printf("rp-id: %s\n", rp_id != NULL ? rp_id : "(undefined)");
+
+		if (rp_name != NULL)
+			printf("rp-name: %s\n", rp_name);
+
+		if (rp_id == NULL)
+			continue;
+
+		if ((rk = fido_credman_rk_new()) == NULL) {
+			explicit_bzero(pin, sizeof(pin));
+			fido_credman_rp_free(&rp);
+			errx(1, "fido_credman_rk_new");
+		}
+
+		r = fido_credman_get_dev_rk(dev, rp_id, rk, pin);
+		if (r != FIDO_OK) {
+			fido_credman_rk_free(&rk);
+			explicit_bzero(pin, sizeof(pin));
+			fido_credman_rp_free(&rp);
+			pin_error(dev, r);
+			errx(1, "fido_credman_get_dev_rk: %s", fido_strerr(r));
+		}
+
+		nrk = fido_credman_rk_count(rk);
+
+		for (j = 0; j < nrk; j++) {
+			cred = fido_credman_rk(rk, j);
+			if (cred == NULL)
+				continue;
+
+			user_name = fido_cred_user_name(cred);
+			display_name = fido_cred_display_name(cred);
+			cred_id = fido_cred_id_ptr(cred);
+			cred_id_len = fido_cred_id_len(cred);
+
+			printf("  credentials:\n");
+
+			if (user_name != NULL)
+				printf("    user-name: %s\n", user_name);
+			if (display_name != NULL)
+				printf("    display-name: %s\n", display_name);
+
+			printf("    credential-id: ");
+			if (cred_id != NULL && cred_id_len != 0)
+				print_hex(cred_id, cred_id_len);
+			else
+				printf("(undefined)");
+			printf("\n");
+		}
+
+		fido_credman_rk_free(&rk);
+	}
+
+	fido_credman_rp_free(&rp);
+	explicit_bzero(pin, sizeof(pin));
+}
+
+static void
 show_info(fido_dev_t *dev, const char *path)
 {
 	fido_cbor_info_t *ci;
@@ -296,6 +457,13 @@ show_retries(fido_dev_t *dev)
 }
 
 static void
+read_pin(char *pin, size_t pinsz)
+{
+	if (readpassphrase("PIN: ", pin, pinsz, RPP_REQUIRE_TTY) == NULL)
+		err(1, "readpassphrase");
+}
+
+static void
 read_new_pin(char *pin, size_t pinsz)
 {
 	char confirm[PIN_BUFSIZE];
@@ -344,7 +512,7 @@ update_pin(fido_dev_t *dev)
 {
 	char oldpin[PIN_BUFSIZE];
 	char pin[PIN_BUFSIZE];
-	int r, retries;
+	int r;
 
 	if (!fido_dev_has_pin(dev))
 		errx(1, "PIN not set");
@@ -361,18 +529,7 @@ update_pin(fido_dev_t *dev)
 	explicit_bzero(pin, sizeof(pin));
 
 	if (r != FIDO_OK) {
-		if (r == FIDO_ERR_PIN_INVALID) {
-			retries = get_retries(dev);
-			if (retries >= 0)
-				errx(1, "incorrect PIN (%d retries remaining)",
-				    retries);
-			errx(1, "incorrect PIN");
-		}
-		if (r == FIDO_ERR_PIN_AUTH_BLOCKED)
-			errx(1, "PIN authentication temporarily blocked, "
-			    "remove and reinsert device");
-		if (r == FIDO_ERR_PIN_BLOCKED)
-			errx(1, "PIN blocked, FIDO reset required");
+		pin_error(dev, r);
 		errx(1, "fido_dev_set_pin: %s", fido_strerr(r));
 	}
 
@@ -383,7 +540,7 @@ static __dead void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: %s [-diPpr] [-f device]\n"
+	    "usage: %s [-cdiPpr] [-f device]\n"
 	    "       %s -R\n",
 	    getprogname(), getprogname());
 	exit(1);
@@ -394,7 +551,8 @@ main(int argc, char *argv[])
 {
 	char device[PATH_MAX];
 	const char *requested;
-	int ch, debug, info, pinop, reset, retries, setpin, updatepin;
+	int ch, credentials, debug, info, reset, retries, setpin, updatepin;
+	int pinop, ttyop;
 	fido_dev_t *dev;
 	int r;
 
@@ -405,9 +563,13 @@ main(int argc, char *argv[])
 	retries = 0;
 	setpin = 0;
 	updatepin = 0;
+	credentials = 0;
 
-	while ((ch = getopt(argc, argv, "dif:pPrR")) != -1) {
+	while ((ch = getopt(argc, argv, "cdif:pPrR")) != -1) {
 		switch (ch) {
+		case 'c':
+			credentials = 1;
+			break;
 		case 'd':
 			debug = 1;
 			break;
@@ -441,10 +603,10 @@ main(int argc, char *argv[])
 		usage();
 
 	if (reset) {
-		if (debug || info || retries || setpin || updatepin
-		    || requested != NULL)
+		if (credentials || debug || info || retries || setpin
+		    || updatepin || requested != NULL)
 			errx(1, "-R cannot be combined with other options");
-	} else if (!info && !retries && !setpin && !updatepin)
+	} else if (!credentials && !info && !retries && !setpin && !updatepin)
 		usage();
 
 	if (setpin && updatepin)
@@ -474,16 +636,17 @@ main(int argc, char *argv[])
 	}
 
 	pinop = setpin || updatepin;
+	ttyop = pinop || credentials;
 
 	/*
 	 * Disable debug mode for PIN operations to prevent display of
 	 * sensitive data.
 	 */
-	if (debug && pinop)
+	if (debug && ttyop)
 		errx(1, "-d cannot be used with PIN operations");
 
 	/* Restrict the available syscall classes. */
-	if (pinop) {
+	if (ttyop) {
 		if (pledge("stdio tty rpath wpath unveil", NULL) == -1)
 			err(1, "pledge");
 	} else {
@@ -509,7 +672,7 @@ main(int argc, char *argv[])
 		errx(1, "%s: %s", device, fido_strerr(r));
 
 	/* if a PIN operation follows, retain terminal access temporarily. */
-	if (pinop) {
+	if (ttyop) {
 		if (pledge("stdio tty", NULL) == -1)
 			err(1, "pledge");
 	} else {
@@ -523,13 +686,16 @@ main(int argc, char *argv[])
 	if (retries)
 		show_retries(dev);
 
+	if (credentials)
+		show_credentials(dev);
+
 	if (setpin)
 		set_pin(dev);
 
 	if (updatepin)
 		update_pin(dev);
 
-	if (pinop) {
+	if (ttyop) {
 		if (pledge("stdio", NULL) == -1)
 			err(1, "pledge");
 	}
