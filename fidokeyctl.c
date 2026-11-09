@@ -31,8 +31,14 @@
 #define MAX_DEVS	64
 #define PIN_BUFSIZE	64
 
+static int		 confirm_delete(void);
 static void		 confirm_reset(void);
+static int		 credential_id_equal(const fido_cred_t *,
+			     const unsigned char *, size_t);
+static void		 delete_credential(fido_dev_t *, const char *);
 static int		 get_retries(fido_dev_t *);
+static int		 hex_value(int);
+static unsigned char *	 parse_hex(const char *, size_t *);
 static void		 pin_error(fido_dev_t *, int);
 static void		 print_aaguid(const fido_cbor_info_t *);
 static void		 print_hex(const unsigned char *, size_t);
@@ -49,6 +55,51 @@ static void		 show_retries(fido_dev_t *);
 static void		 update_pin(fido_dev_t *);
 static __dead void	 usage(void);
 static const char	*yesno(bool);
+
+static unsigned char *
+parse_hex(const char *s, size_t *len)
+{
+	unsigned char *buf;
+	size_t i, slen;
+	int hi, lo;
+
+	slen = strlen(s);
+
+	if (slen == 0 || (slen & 1) != 0)
+		errx(1, "invalid credential ID");
+
+	if ((buf = malloc(slen / 2)) == NULL)
+		err(1, "malloc");
+
+	for (i = 0; i < slen; i += 2) {
+		hi = hex_value((unsigned char)s[i]);
+		lo = hex_value((unsigned char)s[i + 1]);
+
+		if (hi == -1 || lo == -1) {
+			free(buf);
+			errx(1, "invalid credential ID");
+		}
+
+		buf[i / 2] = (unsigned char)((hi << 4) | lo);
+	}
+
+	*len = slen / 2;
+
+	return buf;
+}
+
+static int
+hex_value(int c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+
+	return -1;
+}
 
 static void
 print_hex(const unsigned char *buf, size_t len)
@@ -125,6 +176,159 @@ print_aaguid(const fido_cbor_info_t *ci)
 		printf("%02x", aaguid[i]);
 	}
 	printf("\n");
+}
+
+static int
+credential_id_equal(const fido_cred_t *cred, const unsigned char *id,
+    size_t id_len)
+{
+	const unsigned char *cred_id;
+	size_t cred_id_len;
+
+	cred_id = fido_cred_id_ptr(cred);
+	cred_id_len = fido_cred_id_len(cred);
+
+	if (cred_id == NULL || cred_id_len != id_len)
+		return 0;
+
+	return timingsafe_bcmp(cred_id, id, id_len) == 0;
+}
+
+static int
+confirm_delete(void)
+{
+	char buf[8];
+
+	fprintf(stderr, "Delete this resident credential? [y/N] ");
+
+	if (fgets(buf, sizeof(buf), stdin) == NULL)
+		err(1, "fgets");
+
+	return buf[0] == 'y' || buf[0] == 'Y';
+}
+
+static void
+delete_credential(fido_dev_t *dev, const char *idstr)
+{
+	fido_credman_rk_t *rk = NULL;
+	fido_credman_rp_t *rp = NULL;
+	const fido_cred_t *cred;
+	const unsigned char *cred_id;
+	unsigned char *id = NULL;
+	const char *display_name, *rp_id, *user_name;
+	char pin[PIN_BUFSIZE];
+	size_t cred_id_len, id_len, i, j, nrp, nrk;
+	int found = 0;
+	int r;
+
+	if (!fido_dev_supports_credman(dev))
+		errx(1, "credential management not supported");
+
+	if (!fido_dev_has_pin(dev))
+		errx(1, "PIN not set");
+
+	id = parse_hex(idstr, &id_len);
+
+	read_pin(pin, sizeof(pin));
+
+	if ((rp = fido_credman_rp_new()) == NULL) {
+		explicit_bzero(pin, sizeof(pin));
+		free(id);
+		errx(1, "fido_credman_rp_new");
+	}
+
+	r = fido_credman_get_dev_rp(dev, rp, pin);
+	if (r != FIDO_OK) {
+		explicit_bzero(pin, sizeof(pin));
+		fido_credman_rp_free(&rp);
+		free(id);
+		pin_error(dev, r);
+		errx(1, "fido_credman_get_dev_rp: %s", fido_strerr(r));
+	}
+
+	nrp = fido_credman_rp_count(rp);
+
+	for (i = 0; i < nrp && !found; i++) {
+		rp_id = fido_credman_rp_id(rp, i);
+		if (rp_id == NULL)
+			continue;
+
+		if ((rk = fido_credman_rk_new()) == NULL) {
+			explicit_bzero(pin, sizeof(pin));
+			fido_credman_rp_free(&rp);
+			free(id);
+			errx(1, "fido_credman_rk_new");
+		}
+
+		r = fido_credman_get_dev_rk(dev, rp_id, rk, pin);
+		if (r != FIDO_OK) {
+			fido_credman_rk_free(&rk);
+			explicit_bzero(pin, sizeof(pin));
+			fido_credman_rp_free(&rp);
+			free(id);
+			pin_error(dev, r);
+			errx(1, "fido_credman_get_dev_rk: %s", fido_strerr(r));
+		}
+
+		nrk = fido_credman_rk_count(rk);
+
+		for (j = 0; j < nrk; j++) {
+			cred = fido_credman_rk(rk, j);
+			if (cred == NULL)
+				continue;
+
+			if (!credential_id_equal(cred, id, id_len))
+				continue;
+
+			user_name = fido_cred_user_name(cred);
+			display_name = fido_cred_display_name(cred);
+			cred_id = fido_cred_id_ptr(cred);
+			cred_id_len = fido_cred_id_len(cred);
+
+			printf("rp-id: %s\n", rp_id);
+
+			if (user_name != NULL)
+				printf("user-name: %s\n", user_name);
+
+			if (display_name != NULL)
+				printf("display-name: %s\n", display_name);
+
+			printf("credential-id: ");
+			print_hex(cred_id, cred_id_len);
+			printf("\n");
+
+			found = 1;
+			break;
+		}
+
+		fido_credman_rk_free(&rk);
+	}
+
+	fido_credman_rp_free(&rp);
+
+	if (!found) {
+		explicit_bzero(pin, sizeof(pin));
+		free(id);
+		errx(1, "resident credential not found");
+	}
+
+	if (!confirm_delete()) {
+		explicit_bzero(pin, sizeof(pin));
+		free(id);
+		errx(1, "delete cancelled");
+	}
+
+	r = fido_credman_del_dev_rk(dev, id, id_len, pin);
+
+	explicit_bzero(pin, sizeof(pin));
+	free(id);
+
+	if (r != FIDO_OK) {
+		pin_error(dev, r);
+		errx(1, "fido_credman_del_dev_rk: %s", fido_strerr(r));
+	}
+
+	printf("resident credential deleted\n");
 }
 
 static int
@@ -541,8 +745,9 @@ usage(void)
 {
 	fprintf(stderr,
 	    "usage: %s [-cdiPpr] [-f device]\n"
+	    "       %s -D credential-id [-f device]\n"
 	    "       %s -R\n",
-	    getprogname(), getprogname());
+	    getprogname(), getprogname(), getprogname());
 	exit(1);
 }
 
@@ -551,6 +756,7 @@ main(int argc, char *argv[])
 {
 	char device[PATH_MAX];
 	const char *requested;
+	const char *delete_id;
 	int ch, credentials, debug, info, reset, retries, setpin, updatepin;
 	int pinop, ttyop;
 	fido_dev_t *dev;
@@ -559,16 +765,20 @@ main(int argc, char *argv[])
 	debug = 0;
 	info = 0;
 	requested = NULL;
+	delete_id = NULL;
 	reset = 0;
 	retries = 0;
 	setpin = 0;
 	updatepin = 0;
 	credentials = 0;
 
-	while ((ch = getopt(argc, argv, "cdif:pPrR")) != -1) {
+	while ((ch = getopt(argc, argv, "cD:dif:pPrR")) != -1) {
 		switch (ch) {
 		case 'c':
 			credentials = 1;
+			break;
+		case 'D':
+			delete_id = optarg;
 			break;
 		case 'd':
 			debug = 1;
@@ -602,7 +812,11 @@ main(int argc, char *argv[])
 	if (argc != 0)
 		usage();
 
-	if (reset) {
+	if (delete_id != NULL) {
+		if (credentials || debug || info || retries || setpin
+		    || updatepin || reset)
+			errx(1, "-D cannot be combined with other operations");
+	} else if (reset) {
 		if (credentials || debug || info || retries || setpin
 		    || updatepin || requested != NULL)
 			errx(1, "-R cannot be combined with other options");
@@ -636,11 +850,11 @@ main(int argc, char *argv[])
 	}
 
 	pinop = setpin || updatepin;
-	ttyop = pinop || credentials;
+	ttyop = pinop || credentials || delete_id != NULL;
 
 	/*
-	 * Disable debug mode for PIN operations to prevent display of
-	 * sensitive data.
+	 * Disable debug mode for PIN-authenticated operations to prevent
+	 * display of sensitive data.
 	 */
 	if (debug && ttyop)
 		errx(1, "-d cannot be used with PIN operations");
@@ -688,6 +902,9 @@ main(int argc, char *argv[])
 
 	if (credentials)
 		show_credentials(dev);
+
+	if (delete_id != NULL)
+		delete_credential(dev, delete_id);
 
 	if (setpin)
 		set_pin(dev);
