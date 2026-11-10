@@ -1,4 +1,4 @@
-.\" Copyright (c) 2026 rboug
+.\" Copyright (c) 2026 Remi Bougard <rb@famille-bougard.fr>
 .\"
 .\" Permission to use, copy, modify, and distribute this software for any
 .\" purpose with or without fee is hereby granted, provided that the above
@@ -12,7 +12,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd October 19, 2026
+.Dd November 10, 2026
 .Dt FIDOKEYCTL 1
 .Os
 .Sh NAME
@@ -23,6 +23,9 @@
 .Op Fl cdiPpr
 .Op Fl f Ar device
 .Nm
+.Fl D Ar credential-id
+.Op Fl f Ar device
+.Nm
 .Fl R
 .Sh DESCRIPTION
 The
@@ -31,8 +34,8 @@ utility inspects and manages FIDO authenticators using
 .Xr libfido2 3 .
 .Pp
 It provides a small Unix-style interface for querying authenticator
-capabilities, managing FIDO2 PINs, inspecting resident credentials,
-and performing a guarded FIDO reset.
+capabilities, managing FIDO2 PINs, inspecting and deleting resident
+credentials, and performing a guarded FIDO reset.
 .Pp
 If exactly one FIDO authenticator is connected, it is selected
 automatically.
@@ -55,6 +58,25 @@ information, user information, and credential identifiers.
 The reported remaining credential count is an estimate supplied by
 the authenticator and must not be interpreted as a fixed storage
 capacity.
+.It Fl D Ar credential-id
+Delete the resident credential identified by
+.Ar credential-id .
+.Pp
+The identifier must be specified as the hexadecimal credential
+identifier displayed by
+.Fl c .
+.Pp
+The authenticator PIN is requested from the terminal.
+Before deletion,
+.Nm
+verifies that the credential exists, displays information about it,
+and requests explicit confirmation.
+.Pp
+This operation is destructive and cannot be combined with other
+operations.
+The
+.Fl f
+option may be used to explicitly select the authenticator.
 .It Fl d
 Enable diagnostic output from
 .Xr libfido2 3 .
@@ -150,11 +172,26 @@ the credential identifier.
 .El
 .Pp
 Only resident, also known as discoverable, credentials stored on the
-authenticator can be listed. Non-resident WebAuthn credentials, such
-as traditional security-key registrations, are not visible through
-credential management. The absence of a credential from this output
-does not imply that the authenticator has never been registered with
-the corresponding service.
+authenticator can be listed.
+Non-resident WebAuthn credentials, such as traditional security-key
+registrations, are not visible through credential management.
+The absence of a credential from this output does not imply that the
+authenticator has never been registered with the corresponding
+service.
+.Pp
+The
+.Fl D
+option deletes one resident credential.
+The credential identifier can be obtained from the output of
+.Fl c .
+Before deleting the credential,
+.Nm
+verifies the identifier against the credentials stored on the
+authenticator and displays the matching relying party and user
+information.
+.Pp
+Deleting a resident credential is permanent and may make the
+corresponding passkey unusable.
 .Sh FIDO RESET
 The
 .Fl R
@@ -239,14 +276,30 @@ Display resident credential information:
 $ fidokeyctl -c
 PIN:
 resident-credentials: 2
-resident-credentials-remaining: 23
+resident-credentials-remaining: 98 (estimated)
 
 rp-id: example.com
-rp-name: Example
-  credential:
+  credentials:
     user-name: user
     display-name: User
     credential-id: 0123456789abcdef
+.Ed
+.Pp
+Delete a resident credential:
+.Bd -literal -offset indent
+$ fidokeyctl -D 0123456789abcdef
+PIN:
+rp-id: example.com
+user-name: user
+display-name: User
+credential-id: 0123456789abcdef
+Delete this resident credential? [y/N] y
+resident credential deleted
+.Ed
+.Pp
+Delete a resident credential from a specific authenticator:
+.Bd -literal -offset indent
+$ fidokeyctl -D 0123456789abcdef -f /dev/fido/1
 .Ed
 .Pp
 Reset the FIDO authenticator:
@@ -265,4 +318,4 @@ $ fidokeyctl -R
 .Xr fido_dev_open 3 ,
 .Xr fido_dev_set_pin 3
 .Sh AUTHORS
-.An rboug
+.An Remi Bougard

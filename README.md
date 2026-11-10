@@ -20,6 +20,7 @@ Implemented:
 - improved PIN error and lockout reporting
 - resident/discoverable credential inspection
 - relying party and credential metadata display
+- resident/discoverable credential deletion
 - FIDO authenticator reset with explicit safety checks
 - user verification capabilities
 - credential management capability detection
@@ -76,12 +77,14 @@ rp-id: github.com
 
 ```text
 fidokeyctl [-cdiPpr] [-f device]
+fidokeyctl -D credential-id [-f device]
 fidokeyctl -R
 ```
 
 Options:
 
 - `-c` — display resident/discoverable credential information
+- `-D credential-id` — delete a resident/discoverable credential
 - `-d` — enable `libfido2` debug output
 - `-f device` — select a specific FIDO device
 - `-i` — display authenticator information
@@ -119,6 +122,31 @@ The remaining credential count is an estimate reported by the authenticator and 
 Only resident/discoverable credentials are visible through credential management. A traditional WebAuthn security-key registration may use a non-resident credential and therefore will not appear in `fidokeyctl -c`.
 
 For example, a security key registered with a service solely as a second authentication factor may not be listed, while a passkey stored on the same authenticator typically will be.
+
+### Credential deletion
+
+The `-D credential-id` operation deletes one resident/discoverable credential from the authenticator.
+
+The credential identifier is the hexadecimal value displayed by `fidokeyctl -c`.
+
+Before deletion, `fidokeyctl` authenticates with the FIDO2 PIN, verifies that the credential exists, displays the credential information, and asks for explicit confirmation.
+
+Example:
+
+```text
+$ fidokeyctl -D 0123456789abcdef
+PIN:
+rp-id: example.com
+user-name: user
+display-name: User
+credential-id: 0123456789abcdef
+Delete this resident credential? [y/N] y
+resident credential deleted
+```
+
+`-D` cannot be combined with other operations. The `-f device` option may be used to explicitly select the authenticator.
+
+Credential deletion is permanent. Removing a resident credential from the authenticator may make the corresponding passkey unusable.
 
 ### FIDO reset
 
@@ -191,7 +219,6 @@ It is not intended to replace vendor-specific tools for unrelated functionality 
 
 Future features include:
 
-- resident/discoverable credential deletion and management
 - additional CTAP2 capability and configuration information
 - further PIN and authenticator status reporting
 - CTAP2 configuration operations

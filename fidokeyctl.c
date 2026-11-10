@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 rboug
+ * Copyright (c) 2026 Remi Bougard <rb@famille-bougard.fr>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
